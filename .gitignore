@@ -1,3 +1,5 @@
+settings.py
+
 # ---> Composer
 composer.phar
 /vendor/

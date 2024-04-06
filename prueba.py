@@ -13,7 +13,7 @@ RELAY_PIN = 12
 
 # Inicializar sensor DHT22 y relé
 dht_sensor = dht.DHT22(machine.Pin(DHT_PIN))
-relay = machine.Pin(RELAY_PIN, machine.Pin.IN)
+relay = machine.Pin(RELAY_PIN, machine.Pin.OUT)
 
 # Abrir base de datos BTree para almacenar parámetros
 try:

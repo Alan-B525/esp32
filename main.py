@@ -1,114 +1,121 @@
-# (C) Copyright Peter Hinch 2017-2019.
-# Released under the MIT licence.
-
-from mqtt_as import MQTTClient
-from mqtt_local import config
+import time
+import json
+import machine
+from machine import Pin
+import dht
 import uasyncio as asyncio
-import dht, machine, ujson
-import btree
+from umqtt.robust import MQTTClient
+
+# Cargar los parametros de configuracion desde el archivo settings.py
+try:
+    from settings import SERVIDOR_MQTT, CLIENT_ID
+except ImportError:
+    print("Error: No se pudo cargar el archivo de configuracion settings.py")
+    raise
 
 # Definir pines y configuraciones
-DHT_PIN = 13
-RELAY_PIN = 12
+RELE_PIN = 14
+DHT_PIN = 25
+LED_PIN = 2  # Pin para el LED
 
-# Inicializar sensor DHT22 y relé
+# Inicializar el cliente MQTT
+mqtt = MQTTClient(CLIENT_ID, SERVIDOR_MQTT, port=1883, keepalive=60, ssl=False)
+
+# Inicializar el sensor DHT22
 dht_sensor = dht.DHT22(machine.Pin(DHT_PIN))
-relay = machine.Pin(RELAY_PIN, machine.Pin.IN)
 
-# Abrir base de datos BTree para almacenar parámetros
-try:
-    f = open("parameters.db", "r+b")
-except OSError:
-    f = open("parameters.db", "w+b")
+# Inicializar el LED
+led = Pin(LED_PIN, Pin.OUT)
+relay = Pin(RELE_PIN, Pin.OUT)
 
-parameters_db = btree.open(f)
+# Estado inicial del termostato
+setpoint = 30  # Setpoint inicial de temperatura
+periodo = 60  # Periodo de publicación en segundos
+modo = "automatico"  # Modo inicial (manual o automatico)
+relay_estado = False  # Estado inicial del relé
 
-# Función para leer los parámetros almacenados
-def read_parameters():
-    params = {}
-    for key, value in parameters_db.items():
-        params[key.decode()] = value.decode()
-    return params
+# Función para manejar los mensajes recibidos
+def handle_message(topic, msg):
+    global setpoint, periodo, modo, relay_estado
+    try:
+        payload = json.loads(msg)
+        if topic == b"setpoint":
+            setpoint = payload.get("setpoint", setpoint)
+        elif topic == b"periodo":
+            periodo = payload.get("periodo", periodo)
+        elif topic == b"modo":
+            modo = payload.get("modo", modo)
+        elif topic == b"rele" and modo == "manual":
+            relay_estado = payload.get("estado", relay_estado)
+            controlar_rele()
+        elif topic == b"destello":
+            destello()
+        print("Variables actualizadas:")
+        print("Setpoint:", setpoint)
+        print("Periodo:", periodo)
+        print("Modo:", modo)
+        print("Estado del rele:", relay_estado)
+    except ValueError:
+        print("Error: Mensaje MQTT no valido.")
 
-# Función para escribir los parámetros almacenados
-def write_parameters(params):
-    for key, value in params.items():
-        parameters_db[key.encode()] = value.encode()
-    parameters_db.flush()
+# Función para realizar un destello del LED
+def destello():
+    print("Destellando LED")
+    for _ in range(3):
+        led.value(1)
+        time.sleep_ms(500)
+        led.value(0)
+        time.sleep_ms(500)
 
-# Función de callback para mensajes recibidos
-def sub_cb(topic, msg, retained):
-    print('Topic = {} -> Valor = {}'.format(topic.decode(), msg.decode()))
-    params = read_parameters()
-    message = ujson.loads(msg)
-    if topic == b"setpoint":
-        params["setpoint"] = message["setpoint"]
-    elif topic == b"periodo":
-        params["period"] = message["periodo"]
-    elif topic == b"modo":
-        params["mode"] = message["modo"]
-    elif topic == b"rele":
-        params["relay"] = message["rele"]
-        if params["mode"] == "manual" and message["rele"] == "on":
-            relay.on()
-        elif params["mode"] == "manual" and message["rele"] == "off":
-            relay.off()
-        write_parameters(params)
+# Función para controlar el relé
+def controlar_rele():
+    global relay_estado
+    if modo == "automatico":
+        relay_estado = dht_sensor.temperature() > setpoint
+    relay.value(relay_estado)
 
-# Función para manejar mensajes MQTT
-async def conn_han(client):
-    await client.subscribe('setpoint', 1)
-    await client.subscribe('periodo', 1)
-    await client.subscribe('modo', 1)
-    await client.subscribe('rele', 1)
-
-# Función para destellar el LED
-async def flash_led():
-    led_pin = machine.Pin(2, machine.Pin.OUT)
-    for _ in range(5):
-        led_pin.on()
-        await asyncio.sleep(0.5)
-        led_pin.off()
-        await asyncio.sleep(0.5)
-
-# Función para publicar datos
-async def publish_data(client):
+# Función para publicar los datos
+async def publicar_datos():
     while True:
         try:
             dht_sensor.measure()
-            temperature = dht_sensor.temperature()
-            humidity = dht_sensor.humidity()
-            params = read_parameters()
-            payload = {
-                "temperatura": temperature,
-                "humedad": humidity,
-                "setpoint": params.get("setpoint", "N/A"),
-                "periodo": params.get("periodo", "N/A"),
-                "modo": params.get("mode", "N/A")
+            temperatura = dht_sensor.temperature()
+            humedad = dht_sensor.humidity()
+            data = {
+                "temperatura": temperatura,
+                "humedad": humedad,
+                "setpoint": setpoint,
+                "periodo": periodo,
+                "modo": modo,
             }
-            await client.publish('ID_del_dispositivo', ujson.dumps(payload), qos=1)
-            if params["mode"] == "automatico" and temperature > float(params["setpoint"]):
-                relay.on()
-            else:
-                relay.off()
-            await asyncio.sleep(float(params.get("periodo", "60")))  # Esperar antes de enviar la próxima lectura
-        except OSError as e:
-            print("Error de lectura del sensor:", e)
-            await asyncio.sleep(5)  # Esperar antes de intentar de nuevo
+            mqtt.connect()
+            mqtt.publish(CLIENT_ID, json.dumps(data))
+            mqtt.disconnect()
+            controlar_rele()  # Controlar el relé antes de esperar
+            await asyncio.sleep(periodo)
+        except OSError:
+            print("Error al publicar datos.")
+            await asyncio.sleep(5)
 
-# Define configuración
-config['subs_cb'] = sub_cb
-config['connect_coro'] = conn_han
-config['ssl'] = True
+# Función para suscribirse a los mensajes MQTT
+async def suscribir_mqtt():
+    mqtt.set_callback(handle_message)
+    mqtt.connect()
+    mqtt.subscribe(b"setpoint")
+    mqtt.subscribe(b"periodo")
+    mqtt.subscribe(b"modo")
+    mqtt.subscribe(b"rele")
+    mqtt.subscribe(b"destello")
+    while True:
+        try:
+            mqtt.wait_msg()
+        except OSError:
+            print("Error de conexion MQTT.")
+            await asyncio.sleep(5)
 
-# Configurar cliente MQTT
-MQTTClient.DEBUG = True  # Opcional
-client = MQTTClient(config)
+# Función principal
+async def main():
+    await asyncio.gather(publicar_datos(), suscribir_mqtt())
 
-# Ejecutar el bucle principal
-try:
-    asyncio.run(publish_data(client))
-finally:
-    client.close()
-    f.close()  # Cerrar la base de datos BTree
-    asyncio.new_event_loop()
+# Iniciar el bucle de eventos asyncio
+asyncio.run(main())

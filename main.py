@@ -29,8 +29,8 @@ led = Pin(LED_PIN, Pin.OUT)
 relay = Pin(RELE_PIN, Pin.OUT)
 
 # Estado inicial del termostato
-setpoint = 30  # Setpoint inicial de temperatura
-periodo = 60  # Periodo de publicación en segundos
+setpoint = 32  # Setpoint inicial de temperatura
+periodo = 30  # Periodo de publicación en segundos
 modo = "automatico"  # Modo inicial (manual o automatico)
 relay_estado = False  # Estado inicial del relé
 
